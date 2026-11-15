@@ -148,6 +148,58 @@ def test_urls(data, expected):
     assert clean(data, css_sanitizer=css_sanitizer) == expected
 
 
+@pytest.mark.parametrize(
+    "data, expected",
+    [
+        # Remote url() gets the whole declaration dropped
+        (
+            '<p style="cursor: url(https://evil.example/t.cur), pointer;">bar</p>',
+            '<p style="">bar</p>',
+        ),
+        # Quoted remote url() is dropped, too
+        (
+            "<p style='cursor: url(\"https://evil.example/t.cur\");'>bar</p>",
+            '<p style="">bar</p>',
+        ),
+        # Protocol-relative url() is remote
+        (
+            '<p style="cursor: url(//evil.example/t.cur), pointer;">bar</p>',
+            '<p style="">bar</p>',
+        ),
+        # data: url() is not local
+        (
+            '<p style="cursor: url(data:image/png;base64,AAAA), pointer;">bar</p>',
+            '<p style="">bar</p>',
+        ),
+        # Local urls are kept
+        (
+            '<p style="cursor: url(/t.cur), pointer;">bar</p>',
+            '<p style="cursor: url(/t.cur), pointer;">bar</p>',
+        ),
+        (
+            '<p style="cursor: url(t.cur), pointer;">bar</p>',
+            '<p style="cursor: url(t.cur), pointer;">bar</p>',
+        ),
+        # Fragment urls are kept
+        (
+            '<p style="cursor: url(#t), pointer;">bar</p>',
+            '<p style="cursor: url(#t), pointer;">bar</p>',
+        ),
+        # Quoted local url is kept
+        (
+            "<p style='cursor: url(\"t.cur\"), pointer;'>bar</p>",
+            "<p style='cursor: url(\"t.cur\"), pointer;'>bar</p>",
+        ),
+    ],
+)
+def test_urls_must_be_local(data, expected):
+    css_sanitizer = CSSSanitizer(allowed_css_properties=["cursor"])
+    cleaned = clean(data, css_sanitizer=css_sanitizer)
+    assert cleaned == expected
+    # A second clean is a no-op
+    assert clean(cleaned, css_sanitizer=css_sanitizer) == expected
+
+
 def test_style_hang():
     """The sanitizer should not hang on any inline styles"""
     style = [

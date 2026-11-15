@@ -1,4 +1,54 @@
+import re
+
 import tinycss2
+
+
+#: Regexp matching a uri scheme (e.g. "https:") per RFC 3986
+URI_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
+
+
+def is_local_url(url):
+    """Returns True if the url is a fragment ("#...") or a relative uri"""
+    url = url.strip()
+    if not url:
+        return True
+
+    if url.startswith("#"):
+        return True
+
+    # Protocol-relative uris point at a remote host
+    if url.startswith("//"):
+        return False
+
+    # Anything with a scheme is not local
+    return not URI_SCHEME_RE.match(url)
+
+
+def tokens_have_only_local_urls(tokens):
+    """Returns True if all url() tokens are local urls"""
+    for token in tokens:
+        if token.type == "url":
+            if not is_local_url(token.value):
+                return False
+
+        elif token.type == "function":
+            if token.lower_name == "url":
+                # url("...") with a quoted value parses as a function
+                for arg in token.arguments:
+                    if arg.type == "string" and not is_local_url(arg.value):
+                        return False
+
+            if not tokens_have_only_local_urls(token.arguments):
+                return False
+
+        elif token.type in ("() block", "[] block", "{} block"):
+            if not tokens_have_only_local_urls(token.content):
+                return False
+
+        elif token.type == "error" and token.kind == "bad-url":
+            return False
+
+    return True
 
 
 ALLOWED_CSS_PROPERTIES = frozenset(
@@ -89,7 +139,7 @@ class CSSSanitizer:
                 if (
                     token.lower_name in self.allowed_css_properties
                     or token.lower_name in self.allowed_svg_properties
-                ):
+                ) and tokens_have_only_local_urls(token.value):
                     new_tokens.append(token)
             elif token.type in ("comment", "whitespace"):
                 if new_tokens and new_tokens[-1].type != token.type:

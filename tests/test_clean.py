@@ -3,6 +3,7 @@ import os
 import pytest
 
 from bleach import clean
+from bleach.css_sanitizer import CSSSanitizer
 from bleach.html5lib_shim import Filter
 from bleach.sanitizer import ALLOWED_PROTOCOLS, Cleaner, NoCssSanitizerWarning
 from bleach._vendor.html5lib.constants import rcdataElements
@@ -615,13 +616,21 @@ def test_attributes_list():
             {"protocols": {"http"}},
             '<a href="192.168.100.100:8000">valid</a>',
         ),
-        pytest.param(
-            *(
-                '<a href="192.168.100.100:8000/foo#bar">valid</a>',
-                {"protocols": {"http"}},
-                '<a href="192.168.100.100:8000/foo#bar">valid</a>',
-            ),
-            marks=pytest.mark.xfail,
+        (
+            '<a href="192.168.100.100:8000/foo#bar">valid</a>',
+            {"protocols": {"http"}},
+            '<a href="192.168.100.100:8000/foo#bar">valid</a>',
+        ),
+        # Host with port, path and fragment is a relative reference
+        (
+            '<a href="10.0.0.5:8080/a#b">valid</a>',
+            {"protocols": ALLOWED_PROTOCOLS},
+            '<a href="10.0.0.5:8080/a#b">valid</a>',
+        ),
+        (
+            '<a href="10.0.0.5:8080/a#b">foo</a>',
+            {"protocols": set()},
+            "<a>foo</a>",
         ),
         # Disallow implicit http/https if disallowed
         ('<a href="example.com">foo</a>', {"protocols": set()}, "<a>foo</a>"),
@@ -659,6 +668,102 @@ def test_attributes_list():
 )
 def test_uri_value_allowed_protocols(data, kwargs, expected):
     assert clean(data, **kwargs) == expected
+
+
+@pytest.mark.parametrize(
+    "data, expected",
+    [
+        # Candidates with disallowed protocols get dropped; the rest are kept
+        # with their descriptors and joined with ", "
+        (
+            (
+                '<img srcset="https://example.com/a.png 1x, javascript:alert(1) 2x, '
+                'https://example.com/b.png 2x">'
+            ),
+            '<img srcset="https://example.com/a.png 1x, https://example.com/b.png 2x">',
+        ),
+        # data: uris are not allowed by default
+        (
+            '<img srcset="data:image/png;base64 1x, https://example.com/a.png 1x">',
+            '<img srcset="https://example.com/a.png 1x">',
+        ),
+        # Relative candidates are fine
+        (
+            '<img srcset="/a.png 1x, b.png 2x">',
+            '<img srcset="/a.png 1x, b.png 2x">',
+        ),
+        # Host with port is a relative reference
+        (
+            '<img srcset="10.0.0.5:8080/a.png 1x">',
+            '<img srcset="10.0.0.5:8080/a.png 1x">',
+        ),
+        # All candidates bad -> attribute dropped
+        ('<img srcset="javascript:alert(1) 1x">', "<img>"),
+        ('<img srcset="javascript:alert(1)">', "<img>"),
+    ],
+)
+def test_srcset_uri_list(data, expected):
+    assert clean(data, tags={"img"}, attributes={"img": ["srcset"]}) == expected
+
+
+@pytest.mark.parametrize(
+    "data, expected",
+    [
+        # Uris with disallowed protocols get dropped; the rest are kept
+        (
+            '<a ping="javascript:alert(1) https://example.com/ping" href="/x">y</a>',
+            '<a ping="https://example.com/ping" href="/x">y</a>',
+        ),
+        # data: uris are not allowed by default
+        (
+            '<a ping="https://example.com/p1 data:text/html,x https://example.com/p2">y</a>',
+            '<a ping="https://example.com/p1 https://example.com/p2">y</a>',
+        ),
+        # A bad uri smuggled after a good one gets dropped
+        (
+            '<a ping="https://example.com/ok javascript:alert(1)">y</a>',
+            '<a ping="https://example.com/ok">y</a>',
+        ),
+        # All uris bad -> attribute dropped
+        ('<a ping="javascript:alert(1)" href="/x">y</a>', '<a href="/x">y</a>'),
+    ],
+)
+def test_ping_uri_list(data, expected):
+    assert clean(data, tags={"a"}, attributes={"a": ["href", "ping"]}) == expected
+
+
+def test_clean_fixed_html_exact_and_idempotent():
+    """Fixed-html acceptance: clean output matches char-for-char and a second
+    clean changes nothing"""
+    css_sanitizer = CSSSanitizer(allowed_css_properties=["color", "cursor"])
+    kwargs = {
+        "tags": {"a", "img", "p"},
+        "attributes": {
+            "a": ["href", "ping"],
+            "img": ["src", "srcset"],
+            "p": ["style"],
+        },
+        "css_sanitizer": css_sanitizer,
+    }
+
+    text = (
+        '<p style="cursor: url(https://evil.example/t.cur), pointer; color: red;">x</p>'
+        '<img src="10.0.0.5:8080/a.png" srcset="https://example.com/a.png 1x, '
+        'javascript:alert(1) 2x, /b.png 2x">'
+        '<a href="10.0.0.5:8080/a#b" ping="javascript:alert(1) '
+        'https://example.com/ping">link</a>'
+    )
+    expected = (
+        '<p style="color: red;">x</p>'
+        '<img src="10.0.0.5:8080/a.png" srcset="https://example.com/a.png 1x, '
+        '/b.png 2x">'
+        '<a href="10.0.0.5:8080/a#b" ping="https://example.com/ping">link</a>'
+    )
+
+    cleaned = clean(text, **kwargs)
+    assert cleaned == expected
+    # A second clean is a no-op
+    assert clean(cleaned, **kwargs) == expected
 
 
 def test_svg_attr_val_allows_ref():

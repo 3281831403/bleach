@@ -37,6 +37,17 @@ ALLOWED_ATTRIBUTES = {
 #: Set of allowed protocols
 ALLOWED_PROTOCOLS = frozenset(("http", "https", "mailto"))
 
+#: Regexp for a valid uri scheme per RFC 3986; used to tell a real scheme
+#: apart from a "host:port" prefix that urlparse mistakes for a scheme
+URI_SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*$")
+
+#: Attributes whose value is a comma-separated list of uri candidates where
+#: each candidate is a uri followed by optional descriptors (e.g. srcset)
+ATTR_VAL_IS_URI_LIST = frozenset(((None, "srcset"),))
+
+#: Attributes whose value is a whitespace-separated list of uris (e.g. ping)
+ATTR_VAL_IS_URI_WS_LIST = frozenset(((None, "ping"),))
+
 #: Invisible characters--0 to and including 31 except 9 (tab), 10 (lf), and 13 (cr)
 INVISIBLE_CHARACTERS = "".join(
     [chr(c) for c in chain(range(0, 9), range(11, 13), range(14, 32))]
@@ -263,6 +274,8 @@ class BleachSanitizerFilter(html5lib_shim.SanitizerFilter):
         attributes=ALLOWED_ATTRIBUTES,
         allowed_protocols=ALLOWED_PROTOCOLS,
         attr_val_is_uri=html5lib_shim.attr_val_is_uri,
+        attr_val_is_uri_list=ATTR_VAL_IS_URI_LIST,
+        attr_val_is_uri_ws_list=ATTR_VAL_IS_URI_WS_LIST,
         svg_attr_val_allows_ref=html5lib_shim.svg_attr_val_allows_ref,
         svg_allow_local_href=html5lib_shim.svg_allow_local_href,
         strip_disallowed_tags=False,
@@ -283,6 +296,12 @@ class BleachSanitizerFilter(html5lib_shim.SanitizerFilter):
             to ``bleach.sanitizer.ALLOWED_PROTOCOLS``
 
         :arg attr_val_is_uri: set of attributes that have URI values
+
+        :arg attr_val_is_uri_list: set of attributes whose values are
+            comma-separated lists of URIs with optional descriptors
+
+        :arg attr_val_is_uri_ws_list: set of attributes whose values are
+            whitespace-separated lists of URIs
 
         :arg svg_attr_val_allows_ref: set of SVG attributes that can have
             references
@@ -314,6 +333,8 @@ class BleachSanitizerFilter(html5lib_shim.SanitizerFilter):
         self.strip_html_comments = strip_html_comments
 
         self.attr_val_is_uri = attr_val_is_uri
+        self.attr_val_is_uri_list = attr_val_is_uri_list
+        self.attr_val_is_uri_ws_list = attr_val_is_uri_ws_list
         self.svg_attr_val_allows_ref = svg_attr_val_allows_ref
         self.css_sanitizer = css_sanitizer
         self.svg_allow_local_href = svg_allow_local_href
@@ -507,9 +528,16 @@ class BleachSanitizerFilter(html5lib_shim.SanitizerFilter):
             # URI is impossible to parse, therefore it's not allowed
             return None
 
-        if parsed.scheme:
+        scheme = parsed.scheme
+        if scheme and not URI_SCHEME_RE.match(scheme):
+            # urlparse mistakes the "host:port" prefix of a relative uri like
+            # "10.0.0.5:8080/a#b" for a scheme; a real scheme starts with an
+            # ASCII letter, so treat this as a relative uri
+            scheme = ""
+
+        if scheme:
             # If urlparse found a scheme, check that
-            if parsed.scheme in allowed_protocols:
+            if scheme in allowed_protocols:
                 return value
 
         else:
@@ -531,6 +559,59 @@ class BleachSanitizerFilter(html5lib_shim.SanitizerFilter):
 
         return None
 
+    def sanitize_uri_list_value(self, value, allowed_protocols):
+        """Checks a comma-separated list of uri candidates (e.g. srcset)
+
+        Each candidate is a uri followed by optional descriptors. Candidates
+        whose uri isn't allowed get dropped; the rest are kept along with
+        their descriptors and joined with ", ".
+
+        :arg value: the attribute value to sanitize
+        :arg allowed_protocols: set of allowed protocols
+
+        :returns: allowed value or None if no candidates are allowed
+
+        """
+        candidates = []
+        for candidate in value.split(","):
+            parts = candidate.split()
+            if not parts:
+                continue
+
+            # The uri is the first token; everything else is descriptors
+            if self.sanitize_uri_value(parts[0], allowed_protocols) is None:
+                continue
+
+            candidates.append(" ".join(parts))
+
+        if not candidates:
+            return None
+
+        return ", ".join(candidates)
+
+    def sanitize_uri_ws_list_value(self, value, allowed_protocols):
+        """Checks a whitespace-separated list of uris (e.g. ping)
+
+        Uris that aren't allowed get dropped; the rest are kept and joined
+        with " ".
+
+        :arg value: the attribute value to sanitize
+        :arg allowed_protocols: set of allowed protocols
+
+        :returns: allowed value or None if no uris are allowed
+
+        """
+        uris = [
+            uri
+            for uri in value.split()
+            if self.sanitize_uri_value(uri, allowed_protocols) is not None
+        ]
+
+        if not uris:
+            return None
+
+        return " ".join(uris)
+
     def allow_token(self, token):
         """Handles the case where we're allowing the tag"""
         if "data" in token:
@@ -551,9 +632,28 @@ class BleachSanitizerFilter(html5lib_shim.SanitizerFilter):
                 if not self.attr_filter(token["name"], name, val):
                     continue
 
+                # Sanitize attributes whose values are lists of uris; this
+                # takes precedence over single-uri handling since some
+                # attributes (e.g. ping) show up in both sets
+                if namespaced_name in self.attr_val_is_uri_list:
+                    new_value = self.sanitize_uri_list_value(
+                        val, self.allowed_protocols
+                    )
+                    if new_value is None:
+                        continue
+                    val = new_value
+
+                elif namespaced_name in self.attr_val_is_uri_ws_list:
+                    new_value = self.sanitize_uri_ws_list_value(
+                        val, self.allowed_protocols
+                    )
+                    if new_value is None:
+                        continue
+                    val = new_value
+
                 # Drop attributes with uri values that use a disallowed protocol
                 # Sanitize attributes with uri values
-                if namespaced_name in self.attr_val_is_uri:
+                elif namespaced_name in self.attr_val_is_uri:
                     new_value = self.sanitize_uri_value(val, self.allowed_protocols)
                     if new_value is None:
                         continue
